@@ -1,0 +1,6 @@
+{
+  "name": "GM'S c++",
+  "description": "High-performance professional C++ mobile IDE, compiler, and runner with multi-file support, interactive terminal, syntax highlighting, and visual debugger by Sir Ghulam Mustafa.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
