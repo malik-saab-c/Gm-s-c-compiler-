@@ -1,13 +1,13 @@
 package com.example.viewmodel
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.data.DefaultProjects
+import com.example.data.FileManager
 import com.example.engine.CppDebuggerEngine
 import com.example.engine.CppEngine
 import com.example.model.CompilerConfig
 import com.example.model.CppFile
-import com.example.model.CppStandard
 import com.example.model.DebugSessionState
 import com.example.model.OutputType
 import com.example.model.Snippet
@@ -20,27 +20,34 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.UUID
 
+enum class AppScreen {
+  SPLASH,
+  EDITOR,
+  TERMINAL
+}
+
 data class IdeUiState(
-  val files: List<CppFile> = listOf(DefaultProjects.defaultMainFile, DefaultProjects.defaultHeaderFile),
-  val activeFileId: String = "main_cpp",
+  val currentScreen: AppScreen = AppScreen.SPLASH,
+  val files: List<CppFile> = emptyList(),
+  val activeFileId: String = "",
   val compilerConfig: CompilerConfig = CompilerConfig(),
   val terminalLines: List<TerminalLine> = emptyList(),
   val isRunning: Boolean = false,
-  val isTerminalOpen: Boolean = false,
   val isWaitingForInput: Boolean = false,
   val pendingInputPrompt: String = "",
   val debugState: DebugSessionState = DebugSessionState(),
   val isDebugPanelOpen: Boolean = false,
-  val showSplash: Boolean = true,
   val showNewFileDialog: Boolean = false,
   val showRenameDialog: Boolean = false,
+  val fileToRename: CppFile? = null,
+  val fileToDelete: CppFile? = null,
   val showSnippetsDialog: Boolean = false,
   val showSettingsDialog: Boolean = false,
   val showAboutDialog: Boolean = false,
   val syntaxErrors: List<String> = emptyList()
 )
 
-class IdeViewModel : ViewModel() {
+class IdeViewModel(application: Application) : AndroidViewModel(application) {
 
   private val _uiState = MutableStateFlow(IdeUiState())
   val uiState: StateFlow<IdeUiState> = _uiState.asStateFlow()
@@ -53,15 +60,39 @@ class IdeViewModel : ViewModel() {
   private val undoStack = mutableListOf<String>()
   private val redoStack = mutableListOf<String>()
 
+  init {
+    loadFilesFromDisk()
+  }
+
+  private fun loadFilesFromDisk() {
+    val context = getApplication<Application>().applicationContext
+    val loadedFiles = FileManager.loadFiles(context)
+    val initialActiveId = loadedFiles.firstOrNull()?.id.orEmpty()
+    _uiState.update {
+      it.copy(
+        files = loadedFiles,
+        activeFileId = initialActiveId
+      )
+    }
+  }
+
   val activeFile: CppFile?
     get() = _uiState.value.files.find { it.id == _uiState.value.activeFileId } ?: _uiState.value.files.firstOrNull()
 
   fun dismissSplash() {
-    _uiState.update { it.copy(showSplash = false) }
+    _uiState.update { it.copy(currentScreen = AppScreen.EDITOR) }
   }
 
   fun showSplash() {
-    _uiState.update { it.copy(showSplash = true) }
+    _uiState.update { it.copy(currentScreen = AppScreen.SPLASH) }
+  }
+
+  fun openTerminalScreen() {
+    _uiState.update { it.copy(currentScreen = AppScreen.TERMINAL) }
+  }
+
+  fun closeTerminalScreen() {
+    _uiState.update { it.copy(currentScreen = AppScreen.EDITOR) }
   }
 
   fun selectFile(id: String) {
@@ -77,14 +108,19 @@ class IdeViewModel : ViewModel() {
       redoStack.clear()
       if (undoStack.size > 50) undoStack.removeAt(0)
 
+      val updatedFile = current.copy(content = newContent, isModified = true)
+
+      // 1. Update in-memory state
       _uiState.update { state ->
         val updated = state.files.map { file ->
-          if (file.id == state.activeFileId) {
-            file.copy(content = newContent, isModified = true)
-          } else file
+          if (file.id == state.activeFileId) updatedFile else file
         }
         state.copy(files = updated)
       }
+
+      // 2. Persist to disk immediately
+      val context = getApplication<Application>().applicationContext
+      FileManager.saveFile(context, updatedFile)
     }
   }
 
@@ -93,12 +129,15 @@ class IdeViewModel : ViewModel() {
       val current = activeFile ?: return
       val prev = undoStack.removeAt(undoStack.lastIndex)
       redoStack.add(current.content)
+      val updatedFile = current.copy(content = prev, isModified = true)
       _uiState.update { state ->
         val updated = state.files.map { file ->
-          if (file.id == state.activeFileId) file.copy(content = prev, isModified = true) else file
+          if (file.id == state.activeFileId) updatedFile else file
         }
         state.copy(files = updated)
       }
+      val context = getApplication<Application>().applicationContext
+      FileManager.saveFile(context, updatedFile)
     }
   }
 
@@ -107,12 +146,15 @@ class IdeViewModel : ViewModel() {
       val current = activeFile ?: return
       val next = redoStack.removeAt(redoStack.lastIndex)
       undoStack.add(current.content)
+      val updatedFile = current.copy(content = next, isModified = true)
       _uiState.update { state ->
         val updated = state.files.map { file ->
-          if (file.id == state.activeFileId) file.copy(content = next, isModified = true) else file
+          if (file.id == state.activeFileId) updatedFile else file
         }
         state.copy(files = updated)
       }
+      val context = getApplication<Application>().applicationContext
+      FileManager.saveFile(context, updatedFile)
     }
   }
 
@@ -134,53 +176,100 @@ class IdeViewModel : ViewModel() {
 
   fun createFile(name: String, content: String = "") {
     val cleanName = if (!name.contains(".")) "$name.cpp" else name
+    val initialCode = if (content.isEmpty()) {
+      if (cleanName.endsWith(".h") || cleanName.endsWith(".hpp")) {
+        "// $cleanName\n#pragma once\n\n"
+      } else {
+        "// $cleanName\n#include <iostream>\nusing namespace std;\n\nint main() {\n    cout << \"Hello from $cleanName!\" << endl;\n    return 0;\n}\n"
+      }
+    } else content
+
     val newFile = CppFile(
-      id = UUID.randomUUID().toString(),
+      id = cleanName,
       name = cleanName,
-      content = if (content.isEmpty()) {
-        if (cleanName.endsWith(".h") || cleanName.endsWith(".hpp")) {
-          "// $cleanName\n#pragma once\n\n"
-        } else {
-          "// $cleanName\n#include <iostream>\n\nint main() {\n    std::cout << \"Hello from $cleanName\" << std::endl;\n    return 0;\n}\n"
-        }
-      } else content,
+      content = initialCode,
       isMain = cleanName == "main.cpp"
     )
 
+    // Save to disk
+    val context = getApplication<Application>().applicationContext
+    FileManager.saveFile(context, newFile)
+
     _uiState.update { state ->
+      // Replace if file with same name exists, else append
+      val filtered = state.files.filter { it.name != cleanName }
       state.copy(
-        files = state.files + newFile,
+        files = filtered + newFile,
         activeFileId = newFile.id,
         showNewFileDialog = false
       )
     }
   }
 
-  fun deleteFile(id: String) {
-    if (_uiState.value.files.size <= 1) return // Keep at least one file
+  fun requestDeleteFile(file: CppFile) {
+    _uiState.update { it.copy(fileToDelete = file) }
+  }
+
+  fun cancelDeleteFile() {
+    _uiState.update { it.copy(fileToDelete = null) }
+  }
+
+  fun confirmDeleteFile() {
+    val target = _uiState.value.fileToDelete ?: return
+    val context = getApplication<Application>().applicationContext
+
+    // Delete from disk
+    FileManager.deleteFile(context, target.name)
+
     _uiState.update { state ->
-      val newFiles = state.files.filter { it.id != id }
-      val nextActive = if (state.activeFileId == id) newFiles.first().id else state.activeFileId
-      state.copy(files = newFiles, activeFileId = nextActive)
+      val newFiles = state.files.filter { it.id != target.id }
+      val fallbackFiles = if (newFiles.isEmpty()) {
+        val defaultFile = CppFile("main.cpp", "main.cpp", "// main.cpp\n#include <iostream>\n\nint main() {\n    return 0;\n}\n", isMain = true)
+        FileManager.saveFile(context, defaultFile)
+        listOf(defaultFile)
+      } else newFiles
+
+      val nextActive = if (state.activeFileId == target.id) fallbackFiles.first().id else state.activeFileId
+      state.copy(
+        files = fallbackFiles,
+        activeFileId = nextActive,
+        fileToDelete = null
+      )
     }
   }
 
-  fun renameFile(id: String, newName: String) {
+  fun requestRenameFile(file: CppFile) {
+    _uiState.update { it.copy(showRenameDialog = true, fileToRename = file) }
+  }
+
+  fun cancelRenameFile() {
+    _uiState.update { it.copy(showRenameDialog = false, fileToRename = null) }
+  }
+
+  fun confirmRenameFile(newName: String) {
+    val target = _uiState.value.fileToRename ?: return
+    val cleanName = if (!newName.contains(".")) {
+      if (target.isHeader) "$newName.h" else "$newName.cpp"
+    } else newName
+
+    val context = getApplication<Application>().applicationContext
+    FileManager.renameFile(context, target.name, cleanName, target.content)
+
+    val renamedFile = target.copy(id = cleanName, name = cleanName, isMain = cleanName == "main.cpp")
+
     _uiState.update { state ->
-      val updated = state.files.map { file ->
-        if (file.id == id) file.copy(name = newName) else file
-      }
-      state.copy(files = updated, showRenameDialog = false)
+      val updated = state.files.map { if (it.id == target.id) renamedFile else it }
+      state.copy(
+        files = updated,
+        activeFileId = if (state.activeFileId == target.id) renamedFile.id else state.activeFileId,
+        showRenameDialog = false,
+        fileToRename = null
+      )
     }
   }
 
   fun loadSnippet(snippet: Snippet) {
-    val current = activeFile
-    if (current != null && current.name == snippet.fileName) {
-      updateActiveContent(snippet.code)
-    } else {
-      createFile(snippet.fileName, snippet.code)
-    }
+    createFile(snippet.fileName, snippet.code)
     _uiState.update { it.copy(showSnippetsDialog = false) }
   }
 
@@ -225,7 +314,7 @@ class IdeViewModel : ViewModel() {
       }
       state.copy(
         terminalLines = lines,
-        isTerminalOpen = true,
+        currentScreen = AppScreen.TERMINAL,
         syntaxErrors = errors
       )
     }
@@ -233,17 +322,21 @@ class IdeViewModel : ViewModel() {
 
   fun runCode() {
     val current = activeFile ?: return
-    if (_uiState.value.isRunning) return
+    if (_uiState.value.isRunning) {
+      _uiState.update { it.copy(currentScreen = AppScreen.TERMINAL) }
+      return
+    }
 
+    // Switch to separate terminal screen Pydroid style!
     _uiState.update {
       it.copy(
+        currentScreen = AppScreen.TERMINAL,
         isRunning = true,
-        isTerminalOpen = true,
         terminalLines = listOf(
           TerminalLine("==========================================", OutputType.INFO),
-          TerminalLine(" GM'S c++ IDE - Building & Executing ${current.name}", OutputType.SUCCESS),
+          TerminalLine(" GM'S c++ IDE - Executing ${current.name}", OutputType.SUCCESS),
           TerminalLine(" Developer: Sir Ghulam Mustafa", OutputType.INFO),
-          TerminalLine("==========================================", OutputType.INFO)
+          TerminalLine("==========================================\n", OutputType.INFO)
         )
       )
     }
@@ -311,14 +404,6 @@ class IdeViewModel : ViewModel() {
 
   fun clearTerminal() {
     _uiState.update { it.copy(terminalLines = emptyList()) }
-  }
-
-  fun toggleTerminal(open: Boolean? = null) {
-    _uiState.update { it.copy(isTerminalOpen = open ?: !it.isTerminalOpen) }
-  }
-
-  fun toggleDebugPanel(open: Boolean? = null) {
-    _uiState.update { it.copy(isDebugPanelOpen = open ?: !it.isDebugPanelOpen) }
   }
 
   fun updateCompilerConfig(config: CompilerConfig) {

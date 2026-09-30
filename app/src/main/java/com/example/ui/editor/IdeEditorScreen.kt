@@ -84,10 +84,10 @@ import com.example.model.CppFile
 import com.example.ui.debug.VisualDebuggerPanel
 import com.example.ui.dialogs.AboutDeveloperDialog
 import com.example.ui.dialogs.CompilerSettingsDialog
+import com.example.ui.dialogs.DeleteConfirmDialog
 import com.example.ui.dialogs.NewFileDialog
 import com.example.ui.dialogs.RenameFileDialog
 import com.example.ui.dialogs.SnippetsDialog
-import com.example.ui.terminal.InteractiveTerminalSheet
 import com.example.ui.theme.IdeAmberWarning
 import com.example.ui.theme.IdeBackground
 import com.example.ui.theme.IdeBlueLight
@@ -114,18 +114,17 @@ fun IdeEditorScreen(
 ) {
   val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
   val scope = rememberCoroutineScope()
-  var renamingFileId by remember { mutableStateOf<String?>(null) }
 
   val activeFile = viewModel.activeFile ?: return
 
-  // We maintain TextFieldValue to preserve selection and cursor when inserting symbols
   var textFieldValue by remember(activeFile.id) {
     mutableStateOf(TextFieldValue(activeFile.content, TextRange(activeFile.content.length)))
   }
 
-  // Synchronize when active file content changes from external actions (undo/redo/snippet)
+  // Update text field if file content is modified externally (undo/redo/snippet)
   if (textFieldValue.text != activeFile.content) {
-    textFieldValue = TextFieldValue(activeFile.content, TextRange(activeFile.content.length))
+    val newCursor = minOf(textFieldValue.selection.start, activeFile.content.length)
+    textFieldValue = TextFieldValue(activeFile.content, TextRange(newCursor))
   }
 
   ModalNavigationDrawer(
@@ -145,13 +144,13 @@ fun IdeEditorScreen(
             viewModel.setDialogState(newFile = true)
             scope.launch { drawerState.close() }
           },
-          onRenameFile = {
-            renamingFileId = it
-            viewModel.setDialogState(rename = true)
+          onRenameFile = { file ->
+            viewModel.requestRenameFile(file)
             scope.launch { drawerState.close() }
           },
-          onDeleteFile = {
-            viewModel.deleteFile(it)
+          onDeleteFile = { file ->
+            viewModel.requestDeleteFile(file)
+            scope.launch { drawerState.close() }
           },
           onOpenSnippets = {
             viewModel.setDialogState(snippets = true)
@@ -182,12 +181,11 @@ fun IdeEditorScreen(
           onMenuClick = { scope.launch { drawerState.open() } },
           onCheckSyntax = { viewModel.checkSyntax() },
           onStartDebug = { viewModel.startDebugging() },
-          onToggleTerminal = { viewModel.toggleTerminal() },
-          isTerminalOpen = uiState.isTerminalOpen
+          onOpenTerminal = { viewModel.openTerminalScreen() }
         )
       },
       floatingActionButton = {
-        if (!uiState.isTerminalOpen && !uiState.isDebugPanelOpen) {
+        if (!uiState.isDebugPanelOpen) {
           FloatingActionButton(
             onClick = { viewModel.runCode() },
             containerColor = IdeEmeraldGreen,
@@ -200,7 +198,7 @@ fun IdeEditorScreen(
           ) {
             Icon(
               imageVector = Icons.Default.PlayArrow,
-              contentDescription = "Run C++ Program",
+              contentDescription = "Run C++ Program in Full-Screen Terminal",
               modifier = Modifier.size(34.dp)
             )
           }
@@ -218,7 +216,7 @@ fun IdeEditorScreen(
             files = uiState.files,
             activeFileId = uiState.activeFileId,
             onSelectFile = { viewModel.selectFile(it) },
-            onCloseFile = { viewModel.deleteFile(it) },
+            onCloseFile = { file -> viewModel.requestDeleteFile(file) },
             onNewFile = { viewModel.setDialogState(newFile = true) }
           )
 
@@ -264,26 +262,7 @@ fun IdeEditorScreen(
           )
         }
 
-        // 5. Interactive Terminal Sheet Overlay (Pydroid style)
-        AnimatedVisibility(
-          visible = uiState.isTerminalOpen,
-          enter = slideInVertically { it } + fadeIn(),
-          exit = slideOutVertically { it } + fadeOut(),
-          modifier = Modifier.align(Alignment.BottomCenter)
-        ) {
-          InteractiveTerminalSheet(
-            lines = uiState.terminalLines,
-            isRunning = uiState.isRunning,
-            isWaitingForInput = uiState.isWaitingForInput,
-            pendingInputPrompt = uiState.pendingInputPrompt,
-            onSubmitInput = { viewModel.submitTerminalInput(it) },
-            onClear = { viewModel.clearTerminal() },
-            onClose = { viewModel.toggleTerminal(false) },
-            modifier = Modifier.height(350.dp)
-          )
-        }
-
-        // 6. Visual Debugger Panel Overlay
+        // 5. Visual Debugger Panel Overlay (when debugging)
         AnimatedVisibility(
           visible = uiState.isDebugPanelOpen,
           enter = slideInVertically { it } + fadeIn(),
@@ -309,15 +288,20 @@ fun IdeEditorScreen(
     )
   }
 
-  if (uiState.showRenameDialog && renamingFileId != null) {
-    val fileToRename = uiState.files.find { it.id == renamingFileId }
-    if (fileToRename != null) {
-      RenameFileDialog(
-        currentName = fileToRename.name,
-        onDismiss = { viewModel.setDialogState(rename = false) },
-        onConfirm = { newName -> viewModel.renameFile(fileToRename.id, newName) }
-      )
-    }
+  if (uiState.showRenameDialog && uiState.fileToRename != null) {
+    RenameFileDialog(
+      currentName = uiState.fileToRename.name,
+      onDismiss = { viewModel.cancelRenameFile() },
+      onConfirm = { newName -> viewModel.confirmRenameFile(newName) }
+    )
+  }
+
+  if (uiState.fileToDelete != null) {
+    DeleteConfirmDialog(
+      fileName = uiState.fileToDelete.name,
+      onDismiss = { viewModel.cancelDeleteFile() },
+      onConfirm = { viewModel.confirmDeleteFile() }
+    )
   }
 
   if (uiState.showSnippetsDialog) {
@@ -351,8 +335,7 @@ private fun IdeTopBar(
   onMenuClick: () -> Unit,
   onCheckSyntax: () -> Unit,
   onStartDebug: () -> Unit,
-  onToggleTerminal: () -> Unit,
-  isTerminalOpen: Boolean
+  onOpenTerminal: () -> Unit
 ) {
   TopAppBar(
     title = {
@@ -393,7 +376,6 @@ private fun IdeTopBar(
       }
     },
     actions = {
-      // Check syntax
       IconButton(onClick = onCheckSyntax) {
         Icon(
           imageVector = Icons.Default.CheckCircle,
@@ -403,7 +385,6 @@ private fun IdeTopBar(
         )
       }
 
-      // Start Debugger
       IconButton(onClick = onStartDebug, modifier = Modifier.testTag("start_debugger_top_btn")) {
         Icon(
           imageVector = Icons.Default.BugReport,
@@ -413,12 +394,11 @@ private fun IdeTopBar(
         )
       }
 
-      // Toggle Terminal
-      IconButton(onClick = onToggleTerminal) {
+      IconButton(onClick = onOpenTerminal, modifier = Modifier.testTag("open_terminal_top_btn")) {
         Icon(
           imageVector = Icons.Default.Terminal,
-          contentDescription = "Toggle Terminal",
-          tint = if (isTerminalOpen) IdeBluePrimary else IdeTextSecondary,
+          contentDescription = "Terminal Screen",
+          tint = IdeBluePrimary,
           modifier = Modifier.size(20.dp)
         )
       }
@@ -432,13 +412,13 @@ private fun FilesTabBar(
   files: List<CppFile>,
   activeFileId: String,
   onSelectFile: (String) -> Unit,
-  onCloseFile: (String) -> Unit,
+  onCloseFile: (CppFile) -> Unit,
   onNewFile: () -> Unit
 ) {
   Row(
     modifier = Modifier
       .fillMaxWidth()
-      .height(42.dp)
+      .height(44.dp)
       .background(IdeSurfaceVariant)
       .horizontalScroll(rememberScrollState())
       .padding(horizontal = 6.dp, vertical = 4.dp),
@@ -450,55 +430,65 @@ private fun FilesTabBar(
         shape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp),
         color = if (isActive) IdeWhite else IdeSurfaceVariant,
         border = if (isActive) androidx.compose.foundation.BorderStroke(1.dp, IdeBorder) else null,
-        modifier = Modifier
-          .padding(end = 4.dp)
-          .clickable { onSelectFile(file.id) }
+        modifier = Modifier.padding(end = 4.dp)
       ) {
         Row(
-          modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+          modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
           verticalAlignment = Alignment.CenterVertically
         ) {
-          Icon(
-            imageVector = Icons.Default.Code,
-            contentDescription = null,
-            tint = if (file.isHeader) IdeAmberWarning else IdeBluePrimary,
-            modifier = Modifier.size(14.dp)
-          )
-          Spacer(modifier = Modifier.width(6.dp))
-          Text(
-            text = file.name,
-            fontSize = 12.sp,
-            fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
-            fontFamily = FontFamily.Monospace,
-            color = if (isActive) IdeTextPrimary else IdeTextSecondary
-          )
-          if (files.size > 1) {
-            Spacer(modifier = Modifier.width(6.dp))
+          Row(
+            modifier = Modifier
+              .clickable { onSelectFile(file.id) }
+              .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+          ) {
             Icon(
-              imageVector = Icons.Default.Close,
-              contentDescription = "Close Tab",
-              tint = IdeTextMuted,
-              modifier = Modifier
-                .size(13.dp)
-                .clickable { onCloseFile(file.id) }
+              imageVector = Icons.Default.Code,
+              contentDescription = null,
+              tint = if (file.isHeader) IdeAmberWarning else IdeBluePrimary,
+              modifier = Modifier.size(15.dp)
             )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+              text = file.name,
+              fontSize = 12.sp,
+              fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
+              fontFamily = FontFamily.Monospace,
+              color = if (isActive) IdeTextPrimary else IdeTextSecondary
+            )
+          }
+
+          if (files.size > 1) {
+            Spacer(modifier = Modifier.width(2.dp))
+            IconButton(
+              onClick = { onCloseFile(file) },
+              modifier = Modifier.size(26.dp)
+            ) {
+              Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = "Close ${file.name}",
+                tint = IdeTextMuted,
+                modifier = Modifier.size(14.dp)
+              )
+            }
+          } else {
+            Spacer(modifier = Modifier.width(6.dp))
           }
         }
       }
     }
 
-    // New File "+" Tab
     IconButton(
       onClick = onNewFile,
       modifier = Modifier
-        .size(28.dp)
+        .size(32.dp)
         .testTag("add_tab_button")
     ) {
       Icon(
         imageVector = Icons.Default.Add,
         contentDescription = "New File",
         tint = IdeBluePrimary,
-        modifier = Modifier.size(16.dp)
+        modifier = Modifier.size(18.dp)
       )
     }
   }
@@ -659,8 +649,8 @@ private fun DrawerContent(
   uiState: IdeUiState,
   onSelectFile: (String) -> Unit,
   onNewFile: () -> Unit,
-  onRenameFile: (String) -> Unit,
-  onDeleteFile: (String) -> Unit,
+  onRenameFile: (CppFile) -> Unit,
+  onDeleteFile: (CppFile) -> Unit,
   onOpenSnippets: () -> Unit,
   onOpenSettings: () -> Unit,
   onOpenAbout: () -> Unit
@@ -710,8 +700,8 @@ private fun DrawerContent(
         letterSpacing = 1.sp,
         color = IdeTextMuted
       )
-      IconButton(onClick = onNewFile, modifier = Modifier.size(24.dp)) {
-        Icon(Icons.Default.Add, contentDescription = "New File", tint = IdeBluePrimary, modifier = Modifier.size(18.dp))
+      IconButton(onClick = onNewFile, modifier = Modifier.size(28.dp)) {
+        Icon(Icons.Default.Add, contentDescription = "New File", tint = IdeBluePrimary, modifier = Modifier.size(20.dp))
       }
     }
 
@@ -723,16 +713,20 @@ private fun DrawerContent(
       Surface(
         shape = RoundedCornerShape(8.dp),
         color = if (isSelected) IdeBlueLight.copy(alpha = 0.12f) else Color.Transparent,
-        modifier = Modifier
-          .fillMaxWidth()
-          .clickable { onSelectFile(file.id) }
+        modifier = Modifier.fillMaxWidth()
       ) {
         Row(
-          modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+          modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
           verticalAlignment = Alignment.CenterVertically,
           horizontalArrangement = Arrangement.SpaceBetween
         ) {
-          Row(verticalAlignment = Alignment.CenterVertically) {
+          Row(
+            modifier = Modifier
+              .weight(1f)
+              .clickable { onSelectFile(file.id) }
+              .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+          ) {
             Icon(
               imageVector = Icons.Default.Code,
               contentDescription = null,
@@ -749,13 +743,13 @@ private fun DrawerContent(
             )
           }
 
-          Row {
-            IconButton(onClick = { onRenameFile(file.id) }, modifier = Modifier.size(22.dp)) {
-              Icon(Icons.Default.Edit, contentDescription = "Rename", tint = IdeTextMuted, modifier = Modifier.size(14.dp))
+          Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = { onRenameFile(file) }, modifier = Modifier.size(34.dp)) {
+              Icon(Icons.Default.Edit, contentDescription = "Rename ${file.name}", tint = IdeTextMuted, modifier = Modifier.size(16.dp))
             }
             if (uiState.files.size > 1) {
-              IconButton(onClick = { onDeleteFile(file.id) }, modifier = Modifier.size(22.dp)) {
-                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = IdeRoseError, modifier = Modifier.size(14.dp))
+              IconButton(onClick = { onDeleteFile(file) }, modifier = Modifier.size(34.dp)) {
+                Icon(Icons.Default.Delete, contentDescription = "Delete ${file.name}", tint = IdeRoseError, modifier = Modifier.size(16.dp))
               }
             }
           }

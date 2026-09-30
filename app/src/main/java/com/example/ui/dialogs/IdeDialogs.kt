@@ -61,6 +61,7 @@ import com.example.ui.theme.IdeBluePrimary
 import com.example.ui.theme.IdeBorder
 import com.example.ui.theme.IdeCyanAccent
 import com.example.ui.theme.IdeEmeraldGreen
+import com.example.ui.theme.IdeRoseError
 import com.example.ui.theme.IdeSurfaceVariant
 import com.example.ui.theme.IdeTextMuted
 import com.example.ui.theme.IdeTextPrimary
@@ -200,6 +201,53 @@ fun RenameFileDialog(
     },
     dismissButton = {
       OutlinedButton(onClick = onDismiss, shape = RoundedCornerShape(8.dp)) {
+        Text("Cancel")
+      }
+    }
+  )
+}
+
+@Composable
+fun DeleteConfirmDialog(
+  fileName: String,
+  onDismiss: () -> Unit,
+  onConfirm: () -> Unit
+) {
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    shape = RoundedCornerShape(18.dp),
+    containerColor = IdeWhite,
+    title = {
+      Text(
+        text = "Delete File",
+        fontSize = 18.sp,
+        fontWeight = FontWeight.Bold,
+        color = IdeRoseError
+      )
+    },
+    text = {
+      Text(
+        text = "Are you sure you want to permanently delete \"$fileName\" from device storage? This cannot be undone.",
+        fontSize = 14.sp,
+        color = IdeTextSecondary,
+        lineHeight = 20.sp
+      )
+    },
+    confirmButton = {
+      Button(
+        onClick = onConfirm,
+        colors = ButtonDefaults.buttonColors(containerColor = IdeRoseError),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.testTag("confirm_delete_btn")
+      ) {
+        Text("Delete", color = IdeWhite)
+      }
+    },
+    dismissButton = {
+      OutlinedButton(
+        onClick = onDismiss,
+        shape = RoundedCornerShape(8.dp)
+      ) {
         Text("Cancel")
       }
     }

@@ -22,6 +22,85 @@ class ExampleUnitTest {
   }
 
   @Test
+  fun testUserCustomProgramEven() = runBlocking {
+    val engine = CppEngine()
+    val output = mutableListOf<TerminalLine>()
+
+    // The exact program from user's screenshot
+    val code = """
+      #include <iostream>
+      using namespace std;
+
+      int main() {
+          int num;
+          cout << "enter any number: ";
+          cin >> num;
+
+          if (num % 2 == 0) {
+              cout << "number is even!";
+          } else {
+              cout << "number is odd!";
+          }
+
+          return 0;
+      }
+    """.trimIndent()
+
+    val file = CppFile("main.cpp", "main.cpp", code, isMain = true)
+    engine.execute(
+      code = code,
+      projectFiles = listOf(file),
+      config = CompilerConfig(),
+      inputProvider = { "4" }, // Even number
+      onOutput = { output.add(it) }
+    )
+
+    val allText = output.joinToString("\n") { it.text }
+    assertTrue("Should print 'enter any number: '", allText.contains("enter any number:"))
+    assertTrue("Should output 'number is even!'", allText.contains("number is even!"))
+    assertTrue("Should complete with exit code 0", allText.contains("exit code 0"))
+  }
+
+  @Test
+  fun testUserCustomProgramOdd() = runBlocking {
+    val engine = CppEngine()
+    val output = mutableListOf<TerminalLine>()
+
+    val code = """
+      #include <iostream>
+      using namespace std;
+
+      int main() {
+          int num;
+          cout << "enter any number: ";
+          cin >> num;
+
+          if (num % 2 == 0) {
+              cout << "number is even!";
+          } else {
+              cout << "number is odd!";
+          }
+
+          return 0;
+      }
+    """.trimIndent()
+
+    val file = CppFile("main.cpp", "main.cpp", code, isMain = true)
+    engine.execute(
+      code = code,
+      projectFiles = listOf(file),
+      config = CompilerConfig(),
+      inputProvider = { "7" }, // Odd number
+      onOutput = { output.add(it) }
+    )
+
+    val allText = output.joinToString("\n") { it.text }
+    assertTrue("Should print 'enter any number: '", allText.contains("enter any number:"))
+    assertTrue("Should output 'number is odd!'", allText.contains("number is odd!"))
+    assertTrue("Should complete with exit code 0", allText.contains("exit code 0"))
+  }
+
+  @Test
   fun testCppEngineExecution() = runBlocking {
     val engine = CppEngine()
     val output = mutableListOf<TerminalLine>()
@@ -52,10 +131,10 @@ class ExampleUnitTest {
       onOutput = { output.add(it) }
     )
 
-    val allText = output.joinToString("\n") { it.text }
-    assertTrue(allText.contains("Build succeeded"))
-    assertTrue(allText.contains("1 2 5 8"))
-    assertTrue(allText.contains("exit code 0"))
+    val allOutput = output.joinToString("") { it.text }
+    assertTrue(allOutput.contains("Target Toolchain"))
+    assertTrue(allOutput.contains("1 2 5 8"))
+    assertTrue(allOutput.contains("exit code 0"))
   }
 
   @Test
