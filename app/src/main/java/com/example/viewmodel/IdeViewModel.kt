@@ -358,7 +358,8 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
           _uiState.update { state ->
             state.copy(terminalLines = state.terminalLines + line)
           }
-        }
+        },
+        context = getApplication<Application>().applicationContext
       )
       _uiState.update { it.copy(isRunning = false, isWaitingForInput = false) }
     }

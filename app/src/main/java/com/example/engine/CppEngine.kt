@@ -1,5 +1,6 @@
 package com.example.engine
 
+import android.content.Context
 import com.example.model.CompilerConfig
 import com.example.model.CppFile
 import com.example.model.DebugFrame
@@ -91,7 +92,8 @@ class CppEngine {
     projectFiles: List<CppFile>,
     config: CompilerConfig,
     inputProvider: suspend () -> String,
-    onOutput: (TerminalLine) -> Unit
+    onOutput: (TerminalLine) -> Unit,
+    context: Context? = null
   ) = withContext(Dispatchers.Default) {
     val startTime = System.currentTimeMillis()
 
@@ -118,7 +120,22 @@ class CppEngine {
       onOutput(TerminalLine(warn, OutputType.STDERR))
     }
 
-    // Attempt Real Desktop GNU GCC Execution if online mode is enabled or preferred
+    // 1. Attempt Native System Process Execution via ProcessBuilder if context is available
+    if (context != null) {
+      val nativeCompiler = NativeProcessCompiler(context)
+      val nativeSuccess = nativeCompiler.compileAndExecuteNative(
+        mainCode = preprocessed,
+        projectFiles = projectFiles,
+        config = config,
+        inputProvider = inputProvider,
+        onOutput = onOutput
+      )
+      if (nativeSuccess) {
+        return@withContext
+      }
+    }
+
+    // 2. Attempt Real Desktop GNU GCC Execution if online mode is enabled or preferred
     var executedViaRealCompiler = false
     val realClient = RealCompilerClient()
 
