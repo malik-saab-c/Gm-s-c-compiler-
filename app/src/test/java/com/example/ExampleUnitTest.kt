@@ -189,6 +189,39 @@ class ExampleUnitTest {
   }
 
   @Test
+  fun testUserExactCodeSnippetNoSpacesCin() = runBlocking {
+    val engine = CppEngine()
+    val output = mutableListOf<TerminalLine>()
+
+    // The exact snippet provided by the user in their report
+    val code = """
+      #include <iostream>
+      using namespace std;
+
+      int main() {
+          int a;
+          cout << "H" << endl;
+          cin>>a;
+          return 0;
+      }
+    """.trimIndent()
+
+    val file = CppFile("jfg.cpp", "jfg.cpp", code, isMain = true)
+    engine.execute(
+      code = code,
+      projectFiles = listOf(file),
+      config = CompilerConfig(useOnlineCompiler = false),
+      inputProvider = { "99" },
+      onOutput = { output.add(it) }
+    )
+
+    val allText = output.joinToString("\n") { it.text }
+    assertTrue("Should print 'H'", allText.contains("H"))
+    assertTrue("Should echo stdin input '99'", allText.contains("99"))
+    assertTrue("Should finish with exit code 0", allText.contains("exit code 0"))
+  }
+
+  @Test
   fun testSyntaxHighlighter() {
     val code = "#include <iostream>\nint main() { return 0; }"
     val highlighted = CppSyntaxHighlighter.highlight(code)

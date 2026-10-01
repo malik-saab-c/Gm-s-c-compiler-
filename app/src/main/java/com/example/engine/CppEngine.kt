@@ -136,19 +136,22 @@ class CppEngine {
     }
 
     // 2. Attempt Real Desktop GNU GCC Execution if online mode is enabled or preferred
+    val hasCin = Regex("""\b(?:std::)?(?:cin|scanf|getchar|readline)\b""").containsMatchIn(preprocessed)
     var executedViaRealCompiler = false
     val realClient = RealCompilerClient()
 
-    // If code has interactive cin, ask for input or use local runner for instant interactive experience
-    val hasCin = preprocessed.contains("cin >>") || preprocessed.contains("std::cin >>")
+    if (config.useOnlineCompiler) {
+      // Prompt for cin input if code contains input statements
+      val stdinInput = if (hasCin) {
+        inputProvider()
+      } else ""
 
-    if (!hasCin && config.useOnlineCompiler) {
       // Inline project headers for real compiler
       var inlinedCode = preprocessed
       projectFiles.filter { it.isHeader }.forEach { header ->
         inlinedCode = inlinedCode.replace("#include \"${header.name}\"", "// inlined ${header.name}\n${header.content}\n")
       }
-      executedViaRealCompiler = realClient.compileAndRun(inlinedCode, "", config.standard, onOutput)
+      executedViaRealCompiler = realClient.compileAndRun(inlinedCode, stdinInput, config.standard, onOutput)
     }
 
     if (!executedViaRealCompiler) {
@@ -199,7 +202,7 @@ class CppInterpreterInstance(
       val rawLine = lines[i]
       val line = rawLine.trim()
 
-      if (line.contains("int main") || line.contains("void main")) {
+      if (line.contains("int main") || line.contains("void main") || line.contains("auto main")) {
         inMain = true
         i++
         continue
@@ -224,35 +227,35 @@ class CppInterpreterInstance(
       }
 
       // Handle multithreading simulation
-      if (line.contains("std::thread") || line.contains("thread ")) {
+      if (Regex("""\b(?:std::)?thread\b""").containsMatchIn(line)) {
         handleThreadLine(line)
         i++
         continue
       }
 
-      // Handle cin (with or without std::)
-      if (line.contains("cin >>") || line.contains("std::cin >>")) {
+      // Handle cin (with or without spaces, with or without std::)
+      if (Regex("""\b(?:std::)?cin\b""").containsMatchIn(line)) {
         handleCin(line)
         i++
         continue
       }
 
-      // Handle cout (with or without std::)
-      if (line.contains("cout <<") || line.contains("std::cout <<")) {
+      // Handle cout (with or without spaces, with or without std::)
+      if (Regex("""\b(?:std::)?cout\b""").containsMatchIn(line)) {
         handleCout(line, headerFunctions)
         i++
         continue
       }
 
       // Handle vector declaration / operations
-      if (line.contains("std::vector") || line.contains("vector<")) {
+      if (Regex("""\b(?:std::)?vector\b""").containsMatchIn(line)) {
         handleVectorDecl(line)
         i++
         continue
       }
 
       // Handle sort
-      if (line.contains("std::sort") || line.contains("sort(")) {
+      if (Regex("""\b(?:std::)?sort\b""").containsMatchIn(line)) {
         handleSort(line)
         i++
         continue
@@ -319,23 +322,35 @@ class CppInterpreterInstance(
         var a = 0L
         var b = 1L
         for (k in 2..n) {
-          val c = a + b
+          val temp = a + b
           a = b
-          b = c
+          b = temp
         }
         b
       }
     }
+
+    // Check project header files for function declarations
+    projectFiles.filter { it.isHeader }.forEach { header ->
+      if (header.content.contains("factorial")) {
+        funcs["factorial"] = funcs["factorial"]!!
+      }
+      if (header.content.contains("isPrime")) {
+        funcs["isPrime"] = funcs["isPrime"]!!
+      }
+      if (header.content.contains("fibonacci")) {
+        funcs["fibonacci"] = funcs["fibonacci"]!!
+      }
+    }
+
     return funcs
   }
 
   private fun handleThreadLine(line: String) {
-    val match = Regex("""thread\s+(\w+)\s*\(([^,]+)(?:,\s*([^)]+))?\)""").find(line)
-    if (match != null) {
-      val tName = match.groupValues[1]
-      val funcName = match.groupValues[2].trim()
-      val arg = match.groupValues[3].trim()
-      emitOutput("[Thread $tName] Created & running worker $funcName($arg)\n", OutputType.STDOUT)
+    if (line.contains("thread ") || line.contains("std::thread")) {
+      val tNameMatch = Regex("""thread\s+(\w+)""").find(line)
+      val tName = tNameMatch?.groupValues?.get(1) ?: "t1"
+      emitOutput("[Thread $tName] Spawned asynchronous execution thread...\n", OutputType.INFO)
     } else if (line.contains(".join()")) {
       val tName = line.substringBefore(".join()").trim()
       emitOutput("[Thread $tName] Joined successfully.\n", OutputType.STDOUT)
@@ -343,8 +358,9 @@ class CppInterpreterInstance(
   }
 
   private suspend fun handleCin(line: String) {
-    val parts = line.replace("std::cin", "").replace("cin", "").replace(";", "").split(">>")
-      .map { it.trim() }.filter { it.isNotEmpty() }
+    val clean = line.trim().removeSuffix(";")
+    val afterCin = clean.replace(Regex("""^\s*(?:std::)?cin\s*>>?"""), "")
+    val parts = afterCin.split(Regex("""\s*>>\s*""")).map { it.trim() }.filter { it.isNotEmpty() }
 
     for (targetVar in parts) {
       val input = inputProvider()
@@ -370,13 +386,13 @@ class CppInterpreterInstance(
   }
 
   private fun handleCout(line: String, headerFunctions: Map<String, (Int) -> Long>) {
-    val raw = line.substringAfter("cout").trim()
-    val clean = if (raw.startsWith("<<")) raw.substring(2) else raw
-    val exprs = clean.split("<<")
+    val clean = line.trim().removeSuffix(";")
+    val afterCout = clean.replace(Regex("""^\s*(?:std::)?cout\s*<<?"""), "")
+    val exprs = afterCout.split(Regex("""\s*<<\s*"""))
 
     val sb = StringBuilder()
     for (expr in exprs) {
-      val token = expr.trim().removeSuffix(";").trim()
+      val token = expr.trim()
       if (token.isEmpty()) continue
 
       when {
@@ -519,41 +535,33 @@ class CppInterpreterInstance(
     var executedBranch = false
 
     while (cur < lines.size) {
-      val raw = lines[cur].trim()
+      val line = lines[cur].trim()
 
-      if (raw.startsWith("if ") || raw.startsWith("if(") || raw.startsWith("else if") || raw.startsWith("} else if")) {
-        val cond = raw.substringAfter("(").substringBeforeLast(")")
-        val blockEnd = findMatchingBrace(lines, cur)
-        val bodyLines = extractBlockBody(lines, cur, blockEnd)
+      if (line.startsWith("if ") || line.startsWith("if(") || line.startsWith("else if") || line.startsWith("else if(")) {
+        val condExpr = line.substringAfter("(").substringBeforeLast(")")
+        val branchEnd = findMatchingBrace(lines, cur)
+        val branchLines = lines.subList(cur + 1, branchEnd)
 
         if (!executedBranch) {
-          val condVal = evaluateExpression(cond, headerFunctions)
-          val isTrue = condVal == "true" || (condVal.toDoubleOrNull() ?: 0.0) != 0.0
-          if (isTrue) {
-            executeBlock(bodyLines, headerFunctions)
+          val condResult = evaluateExpression(condExpr, headerFunctions)
+          if (condResult == "true" || (condResult.toDoubleOrNull() ?: 0.0) != 0.0) {
+            executeBlock(branchLines, headerFunctions)
             executedBranch = true
           }
         }
 
-        cur = blockEnd + 1
-        // Look ahead for else
-        if (cur < lines.size) {
-          val next = lines[cur].trim()
-          if (next.startsWith("else") || next.startsWith("} else")) {
-            continue
-          }
-        }
-        break
-      } else if (raw.startsWith("else") || raw.startsWith("} else")) {
-        val blockEnd = findMatchingBrace(lines, cur)
-        val bodyLines = extractBlockBody(lines, cur, blockEnd)
+        cur = branchEnd + 1
+        continue
+      } else if (line.startsWith("else ") || line.startsWith("else{") || line == "else") {
+        val branchEnd = findMatchingBrace(lines, cur)
+        val branchLines = lines.subList(cur + 1, branchEnd)
 
         if (!executedBranch) {
-          executeBlock(bodyLines, headerFunctions)
+          executeBlock(branchLines, headerFunctions)
           executedBranch = true
         }
 
-        cur = blockEnd + 1
+        cur = branchEnd + 1
         break
       } else {
         break
@@ -563,40 +571,42 @@ class CppInterpreterInstance(
     return cur
   }
 
-  private fun extractBlockBody(lines: List<String>, startIdx: Int, endIdx: Int): List<String> {
-    if (startIdx >= endIdx) return emptyList()
-    val body = mutableListOf<String>()
-    for (i in (startIdx + 1) until endIdx) {
-      body.add(lines[i])
-    }
-    return body
-  }
-
-  @Suppress("UNCHECKED_CAST")
   private fun executeForLoop(lines: List<String>, headerFunctions: Map<String, (Int) -> Long>) {
     val header = lines.first().trim()
+    val insideParen = header.substringAfter("(").substringBeforeLast(")").trim()
 
-    val rangeMatch = Regex("""for\s*\(\s*(?:auto|int|double)?\s*(\w+)\s*:\s*(\w+)\s*\)""").find(header)
-    if (rangeMatch != null) {
-      val loopVar = rangeMatch.groupValues[1]
-      val containerName = rangeMatch.groupValues[2]
-      val list = (variables[containerName] as? List<*>) ?: emptyList<Any>()
-
+    // Handle range-based for loop: for (int x : nums) or for (auto item : vec)
+    if (insideParen.contains(":")) {
+      val varName = insideParen.substringBefore(":").replace(Regex("""^(int|long|auto|double|float|string|char)\s+"""), "").trim()
+      val containerName = insideParen.substringAfter(":").trim()
       val bodyLines = lines.subList(1, lines.size - 1)
-      for (elem in list) {
-        variables[loopVar] = elem ?: 0
-        varTypes[loopVar] = "int"
-        executeBlock(bodyLines, headerFunctions)
+
+      val collection = variables[containerName] as? List<*>
+      if (collection != null) {
+        for (item in collection) {
+          if (item != null) {
+            variables[varName] = item
+            executeBlock(bodyLines, headerFunctions)
+          }
+        }
       }
       return
     }
 
-    val standardMatch = Regex("""for\s*\(\s*(?:int|long)?\s*(\w+)\s*=\s*(\d+)\s*;\s*\1\s*([<>=!]+)\s*([^;]+);\s*[^)]+\)""").find(header)
-    if (standardMatch != null) {
-      val loopVar = standardMatch.groupValues[1]
-      val startVal = standardMatch.groupValues[2].toInt()
-      val condOp = standardMatch.groupValues[3]
-      val limitExpr = standardMatch.groupValues[4].trim()
+    // Handle standard 3-part for loop: for (int i = 0; i < n; i++)
+    val parts = insideParen.split(";")
+    if (parts.size >= 3) {
+      val initExpr = parts[0].trim()
+      val condExpr = parts[1].trim()
+      val incrExpr = parts[2].trim()
+
+      val loopVarMatch = Regex("""(int|long)?\s*(\w+)\s*=\s*(\d+)""").find(initExpr)
+      val loopVar = loopVarMatch?.groupValues?.get(2) ?: "i"
+      val startVal = loopVarMatch?.groupValues?.get(3)?.toIntOrNull() ?: 0
+
+      val condOpMatch = Regex("""(\w+)\s*(<=|<|>=|>|!=)\s*(.+)""").find(condExpr)
+      val condOp = condOpMatch?.groupValues?.get(2) ?: "<"
+      val limitExpr = condOpMatch?.groupValues?.get(3) ?: "10"
       val limit = evaluateExpression(limitExpr, headerFunctions).toDoubleOrNull()?.toInt() ?: 10
 
       val bodyLines = lines.subList(1, lines.size - 1)
@@ -643,7 +653,7 @@ class CppInterpreterInstance(
       val trimmed = line.trim()
       if (trimmed.isEmpty() || trimmed.startsWith("//")) continue
 
-      if (trimmed.contains("cout <<") || trimmed.contains("std::cout <<")) {
+      if (Regex("""\b(?:std::)?cout\b""").containsMatchIn(trimmed)) {
         handleCout(trimmed, headerFunctions)
       } else {
         handleVariableDecl(trimmed, headerFunctions)
