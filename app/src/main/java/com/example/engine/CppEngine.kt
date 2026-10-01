@@ -878,7 +878,7 @@ class CppInterpreterInstance(
         "-" -> leftVal - rightVal
         "*" -> leftVal * rightVal
         "/" -> if (rightVal != 0.0) leftVal / rightVal else 0.0
-        "%=" -> if (rightVal != 0.0) (leftVal.toLong() % rightVal.toLong()).toDouble() else 0.0
+        "%" -> if (rightVal != 0.0) (leftVal.toLong() % rightVal.toLong()).toDouble() else 0.0
         else -> leftVal
       }
       return if (res % 1.0 == 0.0) res.toLong().toString() else String.format("%.2f", res)
