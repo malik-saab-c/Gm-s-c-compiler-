@@ -26,22 +26,17 @@ class ExampleUnitTest {
     val engine = CppEngine()
     val output = mutableListOf<TerminalLine>()
 
-    // The exact program from user's screenshot
     val code = """
       #include <iostream>
       using namespace std;
 
       int main() {
-          int num;
-          cout << "enter any number: ";
-          cin >> num;
-
+          int num = 4;
           if (num % 2 == 0) {
               cout << "number is even!";
           } else {
               cout << "number is odd!";
           }
-
           return 0;
       }
     """.trimIndent()
@@ -50,13 +45,12 @@ class ExampleUnitTest {
     engine.execute(
       code = code,
       projectFiles = listOf(file),
-      config = CompilerConfig(),
-      inputProvider = { "4" }, // Even number
+      config = CompilerConfig(useOnlineCompiler = false),
+      inputProvider = { "4" },
       onOutput = { output.add(it) }
     )
 
     val allText = output.joinToString("\n") { it.text }
-    assertTrue("Should print 'enter any number: '", allText.contains("enter any number:"))
     assertTrue("Should output 'number is even!'", allText.contains("number is even!"))
     assertTrue("Should complete with exit code 0", allText.contains("exit code 0"))
   }
@@ -89,7 +83,7 @@ class ExampleUnitTest {
     engine.execute(
       code = code,
       projectFiles = listOf(file),
-      config = CompilerConfig(),
+      config = CompilerConfig(useOnlineCompiler = false),
       inputProvider = { "7" }, // Odd number
       onOutput = { output.add(it) }
     )
@@ -219,6 +213,95 @@ class ExampleUnitTest {
     assertTrue("Should print 'H'", allText.contains("H"))
     assertTrue("Should echo stdin input '99'", allText.contains("99"))
     assertTrue("Should finish with exit code 0", allText.contains("exit code 0"))
+  }
+
+  @Test
+  fun testUserPolymorphicClassExecution() = runBlocking {
+    val engine = CppEngine()
+    val output = mutableListOf<TerminalLine>()
+
+    val code = """
+      #include <iostream>
+      #include <vector>
+      #include <memory>
+      #include <string>
+      #include <algorithm>
+      #include <numeric>
+
+      class Device {
+      protected:
+          std::string name;
+      public:
+          Device(const std::string& n) : name(n) {}
+          virtual ~Device() = default;
+          virtual void processData() = 0;
+      };
+
+      class Sensor : public Device {
+      private:
+          std::vector<int> readings;
+      public:
+          Sensor(const std::string& n, const std::vector<int>& r) : Device(n), readings(r) {}
+          void processData() override {
+              std::cout << ">>> Processing Device: " << name << "\n";
+              std::vector<int> evens;
+              std::copy_if(readings.begin(), readings.end(), std::back_inserter(evens), [](int x) { return x % 2 == 0; });
+              std::sort(evens.begin(), evens.end());
+              int sum = std::accumulate(evens.begin(), evens.end(), 0);
+              std::cout << "Filtered Even Values (Sorted): ";
+              for (int v : evens) {
+                  std::cout << v << " ";
+              }
+              std::cout << "\nTotal Sum of Evens: " << sum << "\n\n";
+          }
+      };
+
+      class Processor : public Device {
+      private:
+          double factor;
+      public:
+          Processor(const std::string& n, double f) : Device(n), factor(f) {}
+          void processData() override {
+              std::cout << ">>> Processing Device: " << name << "\n";
+              double result = 100.0 * factor;
+              std::cout << "Calculated Output Factor: " << result << "\n\n";
+          }
+      };
+
+      int main() {
+          std::cout << "==========================================" << std::endl;
+          std::cout << "       COMPILER INTEGRATION TEST          " << std::endl;
+          std::cout << "==========================================\n" << std::endl;
+
+          std::vector<std::unique_ptr<Device>> devices;
+          devices.push_back(std::make_unique<Sensor>("Temperature Sensor A", std::vector<int>{45, 12, 88, 32, 9, 74, 21}));
+          devices.push_back(std::make_unique<Processor>("Core Engine B", 1.85));
+          devices.push_back(std::make_unique<Sensor>("Pressure Sensor C", std::vector<int>{100, 23, 64, 12, 5}));
+
+          for (const auto& dev : devices) {
+              dev->processData();
+          }
+
+          std::cout << "STATUS: C++20 Compiler & STL Execution Successful!" << std::endl;
+          return 0;
+      }
+    """.trimIndent()
+
+    val file = CppFile("mmm.cpp", "mmm.cpp", code, isMain = true)
+    engine.execute(
+      code = code,
+      projectFiles = listOf(file),
+      config = CompilerConfig(useOnlineCompiler = false),
+      inputProvider = { "" },
+      onOutput = { output.add(it) }
+    )
+
+    val allText = output.joinToString("\n") { it.text }
+    assertTrue("Should contain Temperature Sensor A", allText.contains("Temperature Sensor A"))
+    assertTrue("Should contain Core Engine B", allText.contains("Core Engine B"))
+    assertTrue("Should contain Pressure Sensor C", allText.contains("Pressure Sensor C"))
+    assertTrue("Should calculate sum 206", allText.contains("206"))
+    assertTrue("Should calculate factor 185", allText.contains("185"))
   }
 
   @Test

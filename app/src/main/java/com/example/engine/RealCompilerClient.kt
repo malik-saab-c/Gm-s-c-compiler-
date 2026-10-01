@@ -78,22 +78,33 @@ class RealCompilerClient {
       val compilerOutput = json.optString("compiler_output", "").trim()
       val compilerError = json.optString("compiler_error", "").trim()
       if (compilerOutput.isNotEmpty()) {
-        onOutput(TerminalLine(compilerOutput, OutputType.INFO))
+        compilerOutput.lines().forEach { line ->
+          onOutput(TerminalLine(line, OutputType.INFO))
+        }
       }
       if (compilerError.isNotEmpty()) {
-        onOutput(TerminalLine(compilerError, OutputType.ERROR))
+        compilerError.lines().forEach { line ->
+          onOutput(TerminalLine(line, OutputType.ERROR))
+        }
       }
 
-      // 2. Program Output (stdout)
+      // 2. Program Output (stdout) - split line by line for clean terminal rendering
       val programOutput = json.optString("program_output", "")
       if (programOutput.isNotEmpty()) {
-        onOutput(TerminalLine(programOutput, OutputType.STDOUT))
+        val rawLines = programOutput.split("\n")
+        rawLines.forEachIndexed { index, line ->
+          if (index < rawLines.size - 1 || line.isNotEmpty()) {
+            onOutput(TerminalLine(line, OutputType.STDOUT))
+          }
+        }
       }
 
       // 3. Program Error (stderr)
       val programError = json.optString("program_error", "")
       if (programError.isNotEmpty()) {
-        onOutput(TerminalLine(programError, OutputType.STDERR))
+        programError.lines().forEach { line ->
+          onOutput(TerminalLine(line, OutputType.STDERR))
+        }
       }
 
       // 4. Return exit status

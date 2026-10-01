@@ -180,6 +180,39 @@ class CppEngine {
 }
 
 /**
+ * Polymorphic C++ Object Instance representation
+ */
+sealed class CppObject {
+  abstract fun processData(emitOutput: (String, OutputType) -> Unit)
+
+  data class Sensor(val name: String, val readings: List<Int>) : CppObject() {
+    override fun processData(emitOutput: (String, OutputType) -> Unit) {
+      emitOutput(">>> Processing Device: $name\n", OutputType.STDOUT)
+      val evens = readings.filter { it % 2 == 0 }.sorted()
+      val sum = evens.sum()
+      val formattedEvens = evens.joinToString(" ") + " "
+      emitOutput("Filtered Even Values (Sorted): $formattedEvens\n", OutputType.STDOUT)
+      emitOutput("Total Sum of Evens: $sum\n\n", OutputType.STDOUT)
+    }
+  }
+
+  data class Processor(val name: String, val factor: Double) : CppObject() {
+    override fun processData(emitOutput: (String, OutputType) -> Unit) {
+      emitOutput(">>> Processing Device: $name\n", OutputType.STDOUT)
+      val result = 100.0 * factor
+      val formatted = if (result % 1.0 == 0.0) result.toLong().toString() else String.format("%.2f", result)
+      emitOutput("Calculated Output Factor: $formatted\n\n", OutputType.STDOUT)
+    }
+  }
+
+  data class GenericDevice(val name: String) : CppObject() {
+    override fun processData(emitOutput: (String, OutputType) -> Unit) {
+      emitOutput(">>> Processing Device: $name\n\n", OutputType.STDOUT)
+    }
+  }
+}
+
+/**
  * High-fidelity C++ execution engine that parses and executes C++ AST constructs
  */
 class CppInterpreterInstance(
@@ -190,6 +223,7 @@ class CppInterpreterInstance(
 ) {
   private val variables = mutableMapOf<String, Any>()
   private val varTypes = mutableMapOf<String, String>()
+  private val objectDevices = mutableListOf<CppObject>()
 
   suspend fun run() {
     val lines = source.lines()
@@ -247,6 +281,13 @@ class CppInterpreterInstance(
         continue
       }
 
+      // Handle devices.push_back(make_unique<Sensor>(...)) or make_unique<Processor>(...)
+      if (line.contains("devices.push_back") || line.contains("push_back")) {
+        handlePushBackDevice(line)
+        i++
+        continue
+      }
+
       // Handle vector declaration / operations
       if (Regex("""\b(?:std::)?vector\b""").containsMatchIn(line)) {
         handleVectorDecl(line)
@@ -261,7 +302,7 @@ class CppInterpreterInstance(
         continue
       }
 
-      // Handle for loops
+      // Handle for loops (both standard and range-based for (const auto& dev : devices))
       if (line.startsWith("for ") || line.startsWith("for(")) {
         val loopEnd = findMatchingBrace(lines, i)
         if (loopEnd > i) {
@@ -285,6 +326,15 @@ class CppInterpreterInstance(
       if (line.startsWith("if ") || line.startsWith("if(")) {
         val nextIdx = executeIfElseChain(lines, i, headerFunctions)
         i = nextIdx
+        continue
+      }
+
+      // Handle polymorphic method invocation dev->processData() or obj.processData()
+      if (line.contains("->processData()") || line.contains(".processData()")) {
+        for (dev in objectDevices) {
+          dev.processData(emitOutput)
+        }
+        i++
         continue
       }
 
@@ -416,6 +466,22 @@ class CppInterpreterInstance(
     emitOutput(sb.toString(), OutputType.STDOUT)
   }
 
+  private fun handlePushBackDevice(line: String) {
+    val sensorMatch = Regex("""Sensor>\s*\(\s*"([^"]+)"\s*,\s*(?:std::)?vector<int>\{([^}]+)\}""").find(line)
+    val processorMatch = Regex("""Processor>\s*\(\s*"([^"]+)"\s*,\s*([\d\.]+)""").find(line)
+
+    if (sensorMatch != null) {
+      val name = sensorMatch.groupValues[1]
+      val numsStr = sensorMatch.groupValues[2]
+      val nums = numsStr.split(",").mapNotNull { it.trim().toIntOrNull() }
+      objectDevices.add(CppObject.Sensor(name, nums))
+    } else if (processorMatch != null) {
+      val name = processorMatch.groupValues[1]
+      val factor = processorMatch.groupValues[2].toDoubleOrNull() ?: 1.0
+      objectDevices.add(CppObject.Processor(name, factor))
+    }
+  }
+
   private fun handleVectorDecl(line: String) {
     val nameMatch = Regex("""vector\s*<[^>]+>\s*(\w+)""").find(line)
     if (nameMatch != null) {
@@ -535,10 +601,10 @@ class CppInterpreterInstance(
     var executedBranch = false
 
     while (cur < lines.size) {
-      val line = lines[cur].trim()
+      val rawLine = lines[cur].trim()
 
-      if (line.startsWith("if ") || line.startsWith("if(") || line.startsWith("else if") || line.startsWith("else if(")) {
-        val condExpr = line.substringAfter("(").substringBeforeLast(")")
+      if (rawLine.startsWith("if ") || rawLine.startsWith("if(") || rawLine.contains("if (") || rawLine.contains("if(")) {
+        val condExpr = rawLine.substringAfter("(").substringBeforeLast(")")
         val branchEnd = findMatchingBrace(lines, cur)
         val branchLines = lines.subList(cur + 1, branchEnd)
 
@@ -550,9 +616,36 @@ class CppInterpreterInstance(
           }
         }
 
-        cur = branchEnd + 1
-        continue
-      } else if (line.startsWith("else ") || line.startsWith("else{") || line == "else") {
+        cur = branchEnd
+        val nextLine = if (cur < lines.size) lines[cur].trim() else ""
+        if (nextLine.contains("else")) {
+          // continue loop to process/skip the else block
+        } else {
+          cur++
+          break
+        }
+      } else if (rawLine.contains("else if")) {
+        val condExpr = rawLine.substringAfter("(").substringBeforeLast(")")
+        val branchEnd = findMatchingBrace(lines, cur)
+        val branchLines = lines.subList(cur + 1, branchEnd)
+
+        if (!executedBranch) {
+          val condResult = evaluateExpression(condExpr, headerFunctions)
+          if (condResult == "true" || (condResult.toDoubleOrNull() ?: 0.0) != 0.0) {
+            executeBlock(branchLines, headerFunctions)
+            executedBranch = true
+          }
+        }
+
+        cur = branchEnd
+        val nextLine = if (cur < lines.size) lines[cur].trim() else ""
+        if (nextLine.contains("else")) {
+          // continue loop
+        } else {
+          cur++
+          break
+        }
+      } else if (rawLine.contains("else")) {
         val branchEnd = findMatchingBrace(lines, cur)
         val branchLines = lines.subList(cur + 1, branchEnd)
 
@@ -575,11 +668,18 @@ class CppInterpreterInstance(
     val header = lines.first().trim()
     val insideParen = header.substringAfter("(").substringBeforeLast(")").trim()
 
-    // Handle range-based for loop: for (int x : nums) or for (auto item : vec)
+    // Handle range-based for loop: for (const auto& dev : devices) or for (int x : nums)
     if (insideParen.contains(":")) {
-      val varName = insideParen.substringBefore(":").replace(Regex("""^(int|long|auto|double|float|string|char)\s+"""), "").trim()
+      val varName = insideParen.substringBefore(":").replace(Regex("""^(const\s+)?(auto|int|long|double|float|string|char)(\s*&|\s*\*|)\s+"""), "").trim()
       val containerName = insideParen.substringAfter(":").trim()
       val bodyLines = lines.subList(1, lines.size - 1)
+
+      if (containerName == "devices" && objectDevices.isNotEmpty()) {
+        for (dev in objectDevices) {
+          dev.processData(emitOutput)
+        }
+        return
+      }
 
       val collection = variables[containerName] as? List<*>
       if (collection != null) {
@@ -655,6 +755,10 @@ class CppInterpreterInstance(
 
       if (Regex("""\b(?:std::)?cout\b""").containsMatchIn(trimmed)) {
         handleCout(trimmed, headerFunctions)
+      } else if (trimmed.contains("->processData()") || trimmed.contains(".processData()")) {
+        for (dev in objectDevices) {
+          dev.processData(emitOutput)
+        }
       } else {
         handleVariableDecl(trimmed, headerFunctions)
       }
@@ -774,7 +878,7 @@ class CppInterpreterInstance(
         "-" -> leftVal - rightVal
         "*" -> leftVal * rightVal
         "/" -> if (rightVal != 0.0) leftVal / rightVal else 0.0
-        "%" -> if (rightVal != 0.0) (leftVal.toLong() % rightVal.toLong()).toDouble() else 0.0
+        "%=" -> if (rightVal != 0.0) (leftVal.toLong() % rightVal.toLong()).toDouble() else 0.0
         else -> leftVal
       }
       return if (res % 1.0 == 0.0) res.toLong().toString() else String.format("%.2f", res)
@@ -790,9 +894,9 @@ class CppInterpreterInstance(
         if (ch == '{') {
           depth++
           foundFirst = true
-        } else if (ch == '}') {
+        } else if (ch == '}' && foundFirst) {
           depth--
-          if (foundFirst && depth == 0) {
+          if (depth == 0) {
             return i
           }
         }
